@@ -1,162 +1,164 @@
 // Note: Using prefixed variable to avoid naming collisions in the global scope.
 // This name must exactly match the one referenced in custom metrics.
 const httparchive_observers = {
-  call_stacks: {},
-  constructor_stacks: {},
+  call_stacks: {}
 };
 let httparchive_enable_observations = false;
 
 // Local scope.
 (() => {
-  // Add the pathnames of any functions/properties you want to observe.
-  const OBSERVERS = [
-    "navigator.__proto__.*",
-    "performance.__proto__.*",
-    "performance.timing.__proto__.*",
-    "Array.prototype.*",
-    "String.prototype.*",
-    "Object.prototype.*",
-    "CSSStyleDeclaration.prototype.*",
-    "document.featurePolicy",
-    "document.write",
-    "queueMicrotask",
-    "requestIdleCallback",
-    "scheduler.postTask",
-  ];
 
-  const PROPERTIES_TO_TRACE = new Set(["navigator.userAgent"]);
+// Additional logging.
+const DEBUG_MODE = false;
 
-  // observe number of times a constructor is called
-  const CONSTRUCTORS = ["Worker"];
+// Add the pathnames of any functions/properties you want to observe.
+const OBSERVERS = [
+  'navigator.__proto__.*',
+  'performance.__proto__.*',
+  'performance.timing.__proto__.*',
+  'Array.prototype.*',
+  'String.prototype.*',
+  'Object.prototype.*',
+  'CSSStyleDeclaration.prototype.*',
+  'document.featurePolicy',
+  'document.write',
+  'queueMicrotask',
+  'requestIdleCallback',
+  'navigator.scheduling.isInputPending',
+  'scheduler.postTask',
+  'eval',
+  'Worker'
+];
 
-  function resolveObject(pathname) {
-    let obj = window;
-    let props = pathname.split(".");
+const PROPERTIES_TO_TRACE = new Set([
+  'navigator.userAgent'
+]);
 
-    while (props.length) {
-      if (!obj) {
-        return null;
-      }
+function resolveObject(pathname) {
+  let obj = window;
+  let props = pathname.split('.');
 
-      const prop = props.shift();
-      obj = obj[prop];
+  while (props.length) {
+    if (!obj) {
+      return null;
     }
 
-    return obj || null;
+    const prop = props.shift();
+    obj = obj[prop];
   }
 
-  function getAllProperties(pathname, depth = 1) {
-    if (!depth) {
-      return pathname;
-    }
+  return obj || null;
+}
 
-    const props = pathname.split(".");
-    const parentPathname = props.slice(0, -1).join(".");
-    const parentObj = resolveObject(parentPathname);
+function getAllProperties(pathname, depth=1) {
+  if (!depth) {
+    return pathname;
+  }
 
-    return Object.getOwnPropertyNames(parentObj).flatMap((prop) => {
+  const props = pathname.split('.');
+  const parentPathname = props.slice(0, -1).join('.');
+  const parentObj = resolveObject(parentPathname);
+
+  try {
+    return Object.getOwnPropertyNames(parentObj).flatMap(prop => {
       return getAllProperties(`${parentPathname}.${prop}`, depth - 1);
     });
+  } catch (e) {
+    if (DEBUG_MODE) {
+      console.debug(`Cannot get property names of ${parentPathname}, parent object: ${parentObj}, error: ${e}`);
+    }
+    return pathname;
+  }
+}
+
+function initializeObserver(pathname) {
+  const props = pathname.split('.');
+  const prop = props.at(-1);
+  let parentPathname;
+  let original;
+
+  if (props.at(-2) == '__proto__') {
+    // Omit __proto__ for observation purposes.
+    parentPathname = props.slice(0, -2).join('.');
+  } else {
+    parentPathname = props.slice(0, -1).join('.');
   }
 
-  function initializeObserver(pathname) {
-    const props = pathname.split(".");
-    const prop = props.at(-1);
-    let parentPathname;
-    let original;
-
-    if (props.at(-2) == "__proto__") {
-      // Omit __proto__ for observation purposes.
-      parentPathname = props.slice(0, -2).join(".");
-    } else {
-      parentPathname = props.slice(0, -1).join(".");
-    }
-
+  let parentObj = window;
+  if (parentPathname) {
     pathname = `${parentPathname}.${prop}`;
-    const parentObj = resolveObject(parentPathname);
-
-    try {
-      original = parentObj[prop];
-    } catch (e) {
-      // The property is not accessible.
-      return;
-    }
-
-    try {
-      Object.defineProperty(parentObj, prop, {
-        configurable: true,
-        get: () => {
-          if (!httparchive_enable_observations) {
-            return original;
-          }
-
-          if (PROPERTIES_TO_TRACE.has(pathname)) {
-            // Construct a stack trace.
-            let stack;
-            try {
-              throw new Error();
-            } catch (e) {
-              stack = e.stack;
-            }
-            let stackCounter = httparchive_observers.call_stacks[pathname];
-            if (!stackCounter[stack]) {
-              stackCounter[stack] = 0;
-            }
-            stackCounter[stack]++;
-          }
-
-          // Increment the feature counter.
-          httparchive_observers[pathname]++;
-
-          // Return the original feature.
-          return original;
-        },
-      });
-    } catch (e) {
-      // The property is not observable.
-      return;
-    }
-
-    if (PROPERTIES_TO_TRACE.has(pathname)) {
-      httparchive_observers.call_stacks[pathname] = {};
-    }
-
-    httparchive_observers[pathname] = 0;
+    parentObj = resolveObject(parentPathname);
   }
 
-  OBSERVERS.forEach((pathname) => {
-    if (pathname.split(".").at(-1) == "**") {
-      getAllProperties(pathname, 3).forEach(initializeObserver);
-      return;
+  try {
+    original = parentObj[prop];
+  } catch (e) {
+    // The property is not accessible.
+    if (DEBUG_MODE) {
+      console.debug(`${pathname} is not accessible: ${e}`);
     }
+    return;
+  }
 
-    if (pathname.split(".").at(-1) == "*") {
-      getAllProperties(pathname).forEach(initializeObserver);
-      return;
+  try {
+    Object.defineProperty(parentObj, prop, {
+      configurable: true,
+      get: () => {
+        if (!httparchive_enable_observations) {
+          return original;
+        }
+
+        if (PROPERTIES_TO_TRACE.has(pathname)) {
+          // Construct a stack trace.
+          let stack;
+          try {
+            throw new Error();
+          } catch (e) {
+            stack = e.stack;
+          }
+          let stackCounter = httparchive_observers.call_stacks[pathname];
+          if (!stackCounter[stack]) {
+            stackCounter[stack] = 0;
+          }
+          stackCounter[stack]++;
+        }
+
+        // Increment the feature counter.
+        httparchive_observers[pathname]++;
+
+        // Return the original feature.
+        return original;
+      }
+    });
+  } catch (e) {
+    // The property is not observable.
+    if (DEBUG_MODE) {
+      console.debug(`${pathname} is not observable: ${e}`);
     }
+    return;
+  }
 
-    initializeObserver(pathname);
-  });
+  if (PROPERTIES_TO_TRACE.has(pathname)) {
+    httparchive_observers.call_stacks[pathname] = {};
+  }
 
-  CONSTRUCTORS.forEach((n) => {
-    // keep a reference to the original prototype
-    const original_proto = window[n].prototype;
+  httparchive_observers[pathname] = 0;
+}
 
-    // initialise the counter
-    httparchive_observers.constructor_stacks[n] = 0;
+OBSERVERS.forEach(pathname => {
+  if (pathname.split('.').at(-1) == '**') {
+    getAllProperties(pathname, 3).forEach(initializeObserver);
+    return;
+  }
 
-    // override the constructor
-    window[n] = function (...args) {
-      // increment the counter
-      httparchive_observers.constructor_stacks[n] =
-        httparchive_observers.constructor_stacks[n] + 1;
-      // return the original constructor with the arguments
-      return new original_proto.constructor(args);
-    };
+  if (pathname.split('.').at(-1) == '*') {
+    getAllProperties(pathname).forEach(initializeObserver);
+    return;
+  }
 
-    // restore the original prototype
-    window[n].prototype = original_proto;
-  });
+  initializeObserver(pathname);
+});
 
-  httparchive_enable_observations = true;
+httparchive_enable_observations = true;
+
 })();
